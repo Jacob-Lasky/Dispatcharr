@@ -10,6 +10,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
+import ast
 import hashlib
 import inspect
 import logging
@@ -18,6 +19,7 @@ import socket
 import sys
 import time
 import uuid
+from pathlib import Path
 
 VERSION = '0.1.0'
 GRACE_SECONDS = 180
@@ -28,6 +30,61 @@ _REGISTRY = '_dispatcharr_m3u_pool_guard'
 _scope = getattr(sys.modules.get(_REGISTRY), 'scope_var', None) or ContextVar('m3u_reservation_owner', default=None)
 _held_locks = getattr(sys.modules.get(_REGISTRY), 'lock_var', None) or ContextVar('m3u_assignment_locks', default=frozenset())
 logger = logging.getLogger('apps.m3u.reservation_guard')
+
+SUPPORTED_VERSION = '0.33.0'
+UPSTREAM_REVISION = 'e71bd6cd50931e1381f85521b7f914c47f9528b7'
+# Pin every core file whose functions or loader contract the adapter relies on.
+# Image builds set version.py independently of the source revision.
+CORE_SHA256 = {
+    'apps/m3u/connection_pool.py': 'e79c8d663818068d71b23b2404e9a313ce566bd6a51d4ae217211ac72fc83bfb',
+    'apps/channels/models.py': 'f76cd4a71a2997b04ce836fc3191d56755c26b88fcdfb9caec85b3c67d119f04',
+    'apps/proxy/live_proxy/client_manager.py': '4d0c6c7a4a60fe7d7f97794b4c28b3b9d9703f2772964315a802a3fc4ac2cc9d',
+    'apps/proxy/live_proxy/slot_release.py': '32134f939f7e53cd562140f9057df571e3b1d3852f4d806af64f7ad16723f7ac',
+    'apps/proxy/live_proxy/views.py': '68d3b4097536742945fcb9eccd2d5f95f1cedc0774367d61ba21f33b42bd29c8',
+    'apps/proxy/live_proxy/server.py': 'f6aecdd437c1931bc5bb18f2f005b000d32f4e695d1a85ef131550462806d4ea',
+    'apps/proxy/live_proxy/output/ts/generator.py': 'ebb47c35ce4fa6ffc3baf1d9545089077da9ecafc9cc25f3dc8c326a0aa08904',
+    'apps/proxy/live_proxy/output/fmp4/generator.py': 'dea974dc79ff271b3e973f27571e0c8c2fdff03121a3b3ad8589da415b8d8f54',
+    'apps/plugins/loader.py': 'f6ad90014f5b5f2eb25d2382e1d6c9c2749c6c69202621a445c3a56193da2fbe',
+}
+
+
+def compatibility_errors(root=Path('/app')):
+    """Fail closed on a changed upstream version or hooked implementation."""
+    root = Path(root)
+    errors = []
+    try:
+        nodes = ast.parse((root / 'version.py').read_text()).body
+        version = next(ast.literal_eval(node.value) for node in nodes
+                       if isinstance(node, ast.Assign) and any(
+                           isinstance(target, ast.Name) and target.id == '__version__'
+                           for target in node.targets))
+        if version != SUPPORTED_VERSION:
+            errors.append(f'version.py: expected {SUPPORTED_VERSION}, got {version!r}')
+    except (OSError, SyntaxError, ValueError, TypeError, StopIteration):
+        errors.append('version.py: unable to verify upstream version')
+    for name, expected in CORE_SHA256.items():
+        try:
+            if hashlib.sha256((root / name).read_bytes()).hexdigest() != expected:
+                errors.append(name + ': upstream source differs')
+        except OSError:
+            errors.append(name + ': unable to verify upstream source')
+    return errors
+
+
+def require_supported_core():
+    errors = compatibility_errors()
+    if errors:
+        reason = '; '.join(errors)
+        logger.error('m3u_slot guard refused incompatible core: %s', reason)
+        raise RuntimeError('M3U reservation guard refused incompatible core: ' + reason)
+
+
+def _report_active(guard):
+    logger.info('m3u_slot guard active worker=%s compatible_core=%s upstream=%s '
+                'reclamation_enabled=%s grace_seconds=%s source=%s', worker_id(),
+                SUPPORTED_VERSION, UPSTREAM_REVISION, guard.reclamation_enabled,
+                guard.module.GRACE_SECONDS, guard.module.__file__)
+    return guard
 
 _ACQUIRE = """
 local held = redis.call('HGET', KEYS[1], 'state')
@@ -317,10 +374,13 @@ def _scoped(original, identity):
 
 def install():
     """Install once per web worker, preserving imported aliases across reloads."""
+    # Check before even reusing an installed guard: a loader reload must never
+    # silently accept an upstream update with incompatible lifecycle semantics.
+    require_supported_core()
     if _REGISTRY in sys.modules:
         guard = sys.modules[_REGISTRY]
         guard.reclamation_enabled = True
-        return guard
+        return _report_active(guard)
     from apps.m3u import connection_pool as pool
     from apps.channels import models
     from apps.proxy.live_proxy import client_manager, slot_release, views, server
@@ -419,4 +479,4 @@ def install():
     sys.modules[_REGISTRY] = guard
     RedisClient.get_client().hset(WORKERS, worker_id(), VERSION)
     logger.info('m3u_slot guard installed worker=%s version=%s', worker_id(), VERSION)
-    return guard
+    return _report_active(guard)
