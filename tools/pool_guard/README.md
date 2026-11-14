@@ -4,6 +4,29 @@ web workers through the plugin loader, without restarting an active stream.
 this directory's `plugin.py`, `plugin.json` and `__init__.py` into the persistent
 plugin directory `m3u_pool_guard`, then enable it and reload plugins once.
 
+On Tower this is `/mnt/cache/appdata/dispatcharr/data/plugins/m3u_pool_guard/`
+(also visible through `/mnt/user/appdata/dispatcharr/data/`). The existing
+dockerMan template `my-Dispatcharr.xml` binds its parent to `/data`; both the
+plugin files and the enabled setting in `/data/db` survive image updates and
+container recreation. No image-layer core file, fork image, startup script or
+additional mount is used. The loader installs the guard in each web worker
+at startup. This is a runtime adapter for the core fix, not a fork image.
+
+Version 0.1.1 checks the image's `version.py` and SHA-256 of all nine hooked
+core/loader source files before installing or re-enabling the guard. Only
+Dispatcharr 0.33.0 with the source contract from upstream revision
+`e71bd6cd50931e1381f85521b7f914c47f9528b7` is admitted. An upstream version or
+source mismatch logs `m3u_slot guard refused incompatible core` and refuses
+installation, leaving the updated upstream implementation intact. Do not
+add new supported hashes without validating the lifecycle against that build.
+The image labels say 0.33.0 although that revision's source `version.py` says
+0.32.0; the version check uses the image's stamped version.
+
+The plugin's Status action reports compatibility, loaded source path,
+`reclamation_enabled` and `grace_seconds`. Startup/reload logs include
+`guard active ... reclamation_enabled=True grace_seconds=180`; reservation
+events separately include owner, client ID, profile and generation token.
+
 The W466 defect is a cross-worker reconnect race. TS output can release its
 assignment before `remove_client()` publishes the disconnect marker. Two
 workers in `ChannelService.cancel_pending_shutdown()` can then both call

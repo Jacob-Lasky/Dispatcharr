@@ -5,7 +5,7 @@ import sys
 
 class Plugin:
     name = 'M3U Reservation Guard'
-    version = '0.1.0'
+    version = '0.1.1'
     description = 'Tracks provider slot ownership and reclaims abandoned reservations.'
     actions = [{'id': 'status', 'label': 'Status'}]
 
@@ -21,8 +21,16 @@ class Plugin:
         sys.modules['apps.m3u.reservation_guard'] = guard.module
 
     def run(self, action=None, params=None, context=None):
+        from . import reservation_guard
         guard = sys.modules.get('_dispatcharr_m3u_pool_guard')
-        return {'status': 'ok' if guard else 'error', 'installed': bool(guard),
+        errors = reservation_guard.compatibility_errors()
+        return {'status': 'ok' if guard and not errors else 'error', 'installed': bool(guard),
+                'compatible': not errors, 'compatibility_errors': errors,
+                'core_version': reservation_guard.SUPPORTED_VERSION,
+                'core_revision': reservation_guard.UPSTREAM_REVISION,
+                'reclamation_enabled': bool(guard and guard.reclamation_enabled),
+                'grace_seconds': guard.module.GRACE_SECONDS if guard else None,
+                'source_file': guard.module.__file__ if guard else None,
                 'worker_pid': os.getpid(), 'version': self.version}
 
     def stop(self, context=None):
