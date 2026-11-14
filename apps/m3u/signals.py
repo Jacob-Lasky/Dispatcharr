@@ -16,7 +16,7 @@ def refresh_account_on_save(sender, instance, created, **kwargs):
     call a Celery task that fetches & parses that single account
     if it is active or newly created.
     """
-    if created and instance.account_type != M3UAccount.Types.XC:
+    if created and not instance.is_custom and instance.account_type != M3UAccount.Types.XC:
         refresh_m3u_groups.delay(instance.id)
 
 @receiver(post_save, sender=M3UAccount)
@@ -28,7 +28,7 @@ def create_or_update_refresh_task(sender, instance, created, update_fields=None,
     # Skip rescheduling when only non-schedule fields were saved (e.g. status/last_message
     # updates from the refresh task itself). We only need to reschedule when schedule-relevant
     # fields change or when _cron_expression was explicitly set by the serializer.
-    SCHEDULE_FIELDS = {'refresh_interval', 'is_active', 'refresh_task'}
+    SCHEDULE_FIELDS = {'refresh_interval', 'is_active', 'refresh_task', 'locked', 'name'}
     if (
         not created
         and update_fields is not None
@@ -38,7 +38,7 @@ def create_or_update_refresh_task(sender, instance, created, update_fields=None,
         return
 
     task_name = f"m3u_account-refresh-{instance.id}"
-    should_be_enabled = instance.is_active
+    should_be_enabled = instance.is_active and not instance.is_custom
 
     # Read cron_expression from transient attribute set by the serializer.
     # If not set (e.g. save came from a task updating status/last_message),

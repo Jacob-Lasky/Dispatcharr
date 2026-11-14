@@ -159,6 +159,7 @@ def _ensure_m3u_refresh_terminal_status(account_id):
     try:
         account_data = (
             M3UAccount.objects.filter(id=account_id)
+            .exclude(name=CUSTOM_M3U_ACCOUNT_NAME, locked=True)
             .values("status", "name")
             .first()
         )
@@ -727,6 +728,8 @@ def refresh_m3u_accounts():
     active_accounts = M3UAccount.objects.filter(is_active=True)
     count = 0
     for account in active_accounts:
+        if account.is_custom:
+            continue
         refresh_single_m3u_account.delay(account.id)
         count += 1
 
@@ -881,7 +884,7 @@ def cleanup_stale_group_relationships(account, scan_start_time):
     Remove group relationships that haven't been seen since the stale retention period.
     This follows the same logic as stream cleanup for consistency.
     """
-    if account.locked and account.name == CUSTOM_M3U_ACCOUNT_NAME:
+    if account.is_custom:
         return 0
 
     # Calculate cutoff date for stale group relationships
@@ -1718,6 +1721,12 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False, scan_sta
         lock_renewer.stop()
         release_task_lock("refresh_m3u_account_groups", account_id)
         return f"M3UAccount with ID={account_id} not found or inactive.", None
+
+    # The custom account owns manual streams, never a downloadable playlist.
+    if account.is_custom:
+        lock_renewer.stop()
+        release_task_lock("refresh_m3u_account_groups", account_id)
+        return "Custom account has no feed to refresh.", None
 
     extinf_data = []
     groups = {"Default Group": {}}
@@ -3559,6 +3568,8 @@ def _refresh_single_m3u_account_impl(account_id):
 
     try:
         account = _get_active_m3u_account(account_id)
+        if account.is_custom:
+            return "Custom account has no feed to refresh."
         if not account.is_active:
             logger.debug(f"Account {account_id} is not active, skipping.")
             return

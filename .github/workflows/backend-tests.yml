@@ -2,7 +2,7 @@ name: Backend Tests
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main, dev, release/tower-0.33]
     paths:
       - 'apps/**'
       - 'core/**'
@@ -15,7 +15,7 @@ on:
       - 'scripts/ci_bootstrap_backend.sh'
       - '.github/workflows/backend-tests.yml'
   pull_request:
-    branches: [main, dev]
+    branches: [main, dev, release/tower-0.33]
     paths:
       - 'apps/**'
       - 'core/**'
