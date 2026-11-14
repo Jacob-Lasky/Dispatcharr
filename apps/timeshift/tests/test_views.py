@@ -586,8 +586,8 @@ class RedactUrlTests(TestCase):
         url = "http://user:pass@example.test/timeshift/1.ts"
         self.assertEqual(views._redact_url(url), "http://example.test/...")
 
-    def test_passes_through_non_urls(self):
-        self.assertEqual(views._redact_url("not a url"), "not a url")
+    def test_non_urls_become_placeholder_not_passthrough(self):
+        self.assertEqual(views._redact_url("not a url"), "<unparseable url>")
         self.assertIsNone(views._redact_url(None))
 
 

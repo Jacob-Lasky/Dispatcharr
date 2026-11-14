@@ -31,6 +31,8 @@ from apps.accounts.authentication import ApiKeyAuthentication, QueryParamJWTAuth
 from apps.accounts.xc_auth import authorize_xc_client
 from apps.channels.access import get_channel_for_user
 from apps.channels.utils import get_channel_catchup_streams, is_catchup_enabled
+# Timeshift URLs carry the XC login in path or query; log only scheme://host/...
+from apps.m3u.credentials import redact_url_for_log as _redact_url
 from apps.m3u.connection_pool import (
     pool_has_capacity_for_profile,
     release_profile_slot,
@@ -3357,14 +3359,3 @@ def _stream_from_provider(
     for header_name, header_value in client_length_headers.items():
         response[header_name] = header_value
     return _finalize_timeshift_response(response)
-
-
-def _redact_url(url):
-    """Truncate *url* to ``scheme://host/...`` for safe logging (drops credentials)."""
-    if not url or "://" not in url:
-        return url
-    scheme, rest = url.split("://", 1)
-    if "@" in rest:
-        rest = rest.split("@", 1)[1]
-    host = rest.split("/", 1)[0]
-    return f"{scheme}://{host}/..."

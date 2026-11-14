@@ -8,6 +8,7 @@ from uuid import UUID
 from django.db import close_old_connections
 from django.shortcuts import get_object_or_404
 from apps.channels.models import Channel, Stream
+from apps.m3u.credentials import redact_url_for_log
 from apps.m3u.models import M3UAccount, M3UAccountProfile
 from apps.m3u.connection_pool import (
     get_profile_connection_count,
@@ -368,16 +369,17 @@ def transform_url(
         return input_url
 
     try:
-        logger.debug("Executing URL pattern replacement:")
-        logger.debug(f"  base URL: {input_url}")
-        logger.debug(f"  search: {search_pattern}")
+        # DO NOT log the URLs or patterns themselves: stream URLs and profile
+        # patterns carry provider logins (redact_url_for_log keeps the host).
+        logger.debug(
+            "Executing URL pattern replacement for %s",
+            redact_url_for_log(input_url),
+        )
 
         # Convert JS-style backreferences in replace pattern: $<name> -> \g<name>, $1 -> \1
         # Fixed conversion patterns only; timeout is reserved for the user search.
         safe_replace_pattern = regex.sub(r'\$<([^>]+)>', r'\\g<\1>', replace_pattern)
         safe_replace_pattern = regex.sub(r'\$(\d+)', r'\\\1', safe_replace_pattern)
-        logger.debug(f"  replace: {replace_pattern}")
-        logger.debug(f"  safe replace: {safe_replace_pattern}")
 
         # Apply the transformation (regex module accepts JS-style (?<name>...) natively).
         # timeout bounds ReDoS from nested quantifiers in search_pattern.
@@ -389,16 +391,16 @@ def transform_url(
         )
         if match_count == 0:
             logger.warning(
-                "URL pattern %r did not match: %s",
-                search_pattern,
-                input_url,
+                "URL pattern did not match: %s",
+                redact_url_for_log(input_url),
             )
             return None
 
-        logger.info(f"Generated stream url: {stream_url}")
+        logger.info("Generated stream url: %s", redact_url_for_log(stream_url))
         return stream_url
     except Exception as e:
-        logger.error("Error transforming URL: %s", e)
+        # Type only: regex errors echo the pattern, which can embed the login.
+        logger.error("Error transforming URL: %s", type(e).__name__)
         return None
 
 def get_stream_info_for_switch(
