@@ -1,0 +1,24 @@
+name: Pool guard tests
+on:
+  pull_request:
+    paths: ['apps/m3u/reservation_guard.py', 'apps/m3u/tests/test_reservation_guard.py', 'tools/pool_guard/**', '.github/workflows/pool-guard-tests.yml']
+  push:
+    branches: ['release/tower-0.33']
+    paths: ['apps/m3u/reservation_guard.py', 'apps/m3u/tests/test_reservation_guard.py', 'tools/pool_guard/**', '.github/workflows/pool-guard-tests.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container:
+      image: ghcr.io/dispatcharr/dispatcharr@sha256:96bc548978c68e684677da7895692eeeefb7f0b2edfa38311dac2b702c61d236
+      options: --entrypoint "" --memory=4g --memory-swap=4g
+    env:
+      DJANGO_SECRET_KEY: scratch-only-ci
+      DISPATCHARR_LOG_LEVEL: WARNING
+      RESERVATION_GUARD_TEST_REDIS: redis://127.0.0.1:6379/15
+    steps:
+      - uses: actions/checkout@v6
+      - run: bash scripts/ci_bootstrap_backend.sh --verbosity 0
