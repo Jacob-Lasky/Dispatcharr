@@ -21,6 +21,41 @@ CREDENTIAL_TRANSFORM_REGEX_TIMEOUT = 0.1
 
 TransformedCredentials = Tuple[Optional[str], Optional[str], Optional[str]]
 
+# Last path segment of the synthetic XC URL built for credential transforms.
+_SYNTHETIC_STREAM = "1234.ts"
+# Logged in place of a URL whose host cannot be isolated safely.
+UNPARSEABLE_URL = "<unparseable url>"
+# Stream URL schemes Dispatcharr fetches; any other scheme text is not logged.
+_LOGGABLE_SCHEMES = frozenset({"http", "https", "rtsp", "rtp", "udp", "rtmp", "srt"})
+
+
+def redact_url_for_log(url):
+    """
+    Reduce *url* to ``scheme://host/...`` for logging; never raises.
+
+    DO NOT log a stream or credential-transform URL without this. XC logins sit
+    in the path (``/live/<username>/<password>/...``) or the query
+    (``get.php?username=&password=``), and profile replace patterns can put
+    them anywhere. So only an allowlisted scheme and the hostname survive: the
+    port is dropped (numeric passwords are common and a pattern can write one
+    there), and anything else (relative URLs, unknown schemes, malformed IPv6)
+    becomes UNPARSEABLE_URL rather than passing through. A pattern that writes
+    the login as the hostname itself is outside this contract: the host is
+    what makes the line useful.
+    """
+    if url is None:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(str(url))
+        host = parsed.hostname
+        scheme = parsed.scheme.lower()
+    except Exception:
+        return UNPARSEABLE_URL
+    if scheme not in _LOGGABLE_SCHEMES or not host:
+        return UNPARSEABLE_URL
+    netloc = f"[{host}]" if ":" in host else host
+    return f"{scheme}://{netloc}/..."
+
 
 def _js_replace_to_python(replace_pattern: str) -> str:
     """Convert JS-style $<name> / $1 backreferences to Python regex form."""
@@ -60,10 +95,11 @@ def get_transformed_credentials(account, profile=None) -> TransformedCredentials
                     account.name,
                 )
         except Exception as exc:
+            # Type only: DB errors can quote the query parameters.
             logger.warning(
                 "Could not get primary profile for account %s: %s",
                 account.name,
-                exc,
+                type(exc).__name__,
             )
             profile = None
 
@@ -82,8 +118,13 @@ def get_transformed_credentials(account, profile=None) -> TransformedCredentials
 
     clean_server_url = base_url.rstrip("/")
     # Synthetic XC live URL used only to apply search/replace and extract login.
-    complete_url = f"{clean_server_url}/live/{base_username}/{base_password}/1234.ts"
-    logger.debug("Built complete URL for credential transform: %s", complete_url)
+    complete_url = (
+        f"{clean_server_url}/live/{base_username}/{base_password}/{_SYNTHETIC_STREAM}"
+    )
+    logger.debug(
+        "Built complete URL for credential transform: %s",
+        redact_url_for_log(complete_url),
+    )
 
     has_patterns = bool(
         profile and profile.search_pattern and profile.replace_pattern
@@ -108,35 +149,37 @@ def get_transformed_credentials(account, profile=None) -> TransformedCredentials
         )
         return None, None, None
     except Exception as exc:
+        # Type only: regex errors echo the pattern, which can embed the login.
         logger.error(
             "Error transforming credentials for profile '%s': %s",
             profile_label,
-            exc,
+            type(exc).__name__,
         )
         return None, None, None
 
     if match_count == 0:
+        # The pattern is not logged: profiles commonly embed the login in it.
         logger.warning(
-            "Profile '%s' search_pattern did not match (pattern=%r)",
+            "Profile '%s' search_pattern did not match",
             profile_label,
-            profile.search_pattern,
         )
         return None, None, None
 
-    logger.info(
-        "Transformed complete URL: %s -> %s",
-        complete_url,
-        transformed_complete_url,
+    logger.debug(
+        "Transformed complete URL for profile '%s': %s -> %s",
+        profile_label,
+        redact_url_for_log(complete_url),
+        redact_url_for_log(transformed_complete_url),
     )
 
     parsed_url = urllib.parse.urlparse(transformed_complete_url)
     path_parts = [part for part in parsed_url.path.split("/") if part]
 
-    if len(path_parts) < 4 or path_parts[-1] != "1234.ts":
+    if len(path_parts) < 4 or path_parts[-1] != _SYNTHETIC_STREAM:
         logger.warning(
             "Could not extract credentials from transformed URL for profile '%s': %s",
             profile_label,
-            transformed_complete_url,
+            redact_url_for_log(transformed_complete_url),
         )
         return None, None, None
 
@@ -148,10 +191,9 @@ def get_transformed_credentials(account, profile=None) -> TransformedCredentials
     transformed_url = f"{parsed_url.scheme}://{parsed_url.netloc}{base_path}"
 
     logger.debug(
-        "Extracted transformed credentials for profile '%s': server=%s user=%s",
+        "Extracted transformed credentials for profile '%s': server=%s",
         profile_label,
-        transformed_url,
-        transformed_username,
+        redact_url_for_log(transformed_url),
     )
     return transformed_url, transformed_username, transformed_password
 

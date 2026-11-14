@@ -1,5 +1,7 @@
 """Tests for fail-closed XC credential transforms and shared URL building."""
 
+import logging
+
 from django.test import TestCase, SimpleTestCase
 from unittest.mock import MagicMock, patch
 
@@ -271,3 +273,201 @@ class BuildVodStreamUrlTests(TestCase):
             url,
             "http://provider.example/series/user1/user1pass/888.mp4",
         )
+
+
+
+class CredentialLogRedactionTests(TestCase):
+    """W497: credential transforms must never write a provider login to the logs.
+
+    Every record at every level is captured, because DEBUG is enabled in the
+    field when diagnosing streams, and the original leak was an INFO line on
+    every stream start. Usernames count: with the host they are half a login.
+    """
+
+    SECRETS = ("baseuser", "basepass", "user1", "user1pass")
+
+    def setUp(self):
+        self.account = M3UAccount.objects.create(
+            name="cred-log-redaction",
+            account_type="XC",
+            server_url="http://provider.example/sub",
+            username="baseuser",
+            password="basepass",
+        )
+
+    def _profile(self, search, replace):
+        return M3UAccountProfile.objects.create(
+            m3u_account=self.account,
+            name="redaction",
+            max_streams=1,
+            is_active=True,
+            search_pattern=search,
+            replace_pattern=replace,
+        )
+
+    def _call_without_leak(self, func, *args, logger_name):
+        with self.assertLogs(logger_name, level="DEBUG") as captured:
+            # Guarantees assertLogs has at least one record even if func is silent.
+            logging.getLogger(logger_name).debug("redaction-probe")
+            result = func(*args)
+        records = [record.getMessage() for record in captured.records]
+        joined = "\n".join(records)
+        for secret in self.SECRETS:
+            self.assertNotIn(secret, joined)
+        return result, records
+
+    def _credentials(self, profile):
+        return self._call_without_leak(
+            get_transformed_credentials,
+            self.account,
+            profile,
+            logger_name="apps.m3u.credentials",
+        )
+
+    def test_successful_transform_logs_no_login_and_is_debug_only(self):
+        profile = self._profile("baseuser/basepass", "user1/user1pass")
+        with self.assertLogs("apps.m3u.credentials", level="DEBUG") as captured:
+            logging.getLogger("apps.m3u.credentials").debug("redaction-probe")
+            get_transformed_credentials(self.account, profile)
+        self.assertEqual(
+            [r.levelname for r in captured.records if "Transformed" in r.getMessage()],
+            ["DEBUG"],
+        )
+        result, records = self._credentials(profile)
+        self.assertEqual(result, ("http://provider.example/sub", "user1", "user1pass"))
+        self.assertIn("http://provider.example/...", "\n".join(records))
+
+    def test_identity_profile_logs_no_login(self):
+        profile = self._profile("^(.*)$", "$1")
+        result, _records = self._credentials(profile)
+        self.assertEqual(result, ("http://provider.example/sub", "baseuser", "basepass"))
+
+    def test_login_in_server_path_is_not_logged(self):
+        self.account.server_url = "http://provider.example/baseuser/basepass"
+        self.account.save()
+        profile = self._profile("baseuser/basepass/live", "baseuser/basepass/live")
+        self._credentials(profile)
+
+    def test_non_matching_pattern_does_not_log_pattern(self):
+        profile = self._profile("baseuser/basepass-stale", "user1/user1pass")
+        result, records = self._credentials(profile)
+        self.assertEqual(result, (None, None, None))
+        self.assertTrue(any("did not match" in line for line in records))
+
+    def test_unparsable_transform_logs_no_login(self):
+        profile = self._profile(r"/1234\.ts$", "/user1pass")
+        result, records = self._credentials(profile)
+        self.assertEqual(result, (None, None, None))
+        self.assertTrue(any("Could not extract credentials" in r for r in records))
+
+    def test_invalid_pattern_error_does_not_echo_pattern(self):
+        # regex error text quotes the offending escape, which here holds the login.
+        profile = self._profile(r"\Ubasepass", "user1/user1pass")
+        result, records = self._credentials(profile)
+        self.assertEqual(result, (None, None, None))
+        self.assertTrue(any("Error transforming credentials" in r for r in records))
+
+    def test_transformed_url_with_password_as_port_is_not_logged(self):
+        profile = self._profile(r"^.*$", "http://provider.example:user1pass/live/a/b/1234.ts")
+        result, _records = self._credentials(profile)
+        # Return value is unchanged from before W497; only the logs are guarded.
+        self.assertEqual(result, ("http://provider.example:user1pass", "a", "b"))
+
+    def test_numeric_password_as_port_is_not_logged(self):
+        self.account.password = "12345"
+        self.account.save()
+        self.SECRETS = self.SECRETS + ("12345",)
+        profile = self._profile(r"^.*$", "http://provider.example:12345/live/u/p/1234.ts")
+        self._credentials(profile)
+
+    def test_password_as_scheme_is_not_logged(self):
+        profile = self._profile(r"^.*$", "basepass://provider.example/live/u/p/1234.ts")
+        self._credentials(profile)
+
+    def test_profile_lookup_error_text_is_not_logged(self):
+        with patch(
+            "apps.m3u.models.M3UAccountProfile.objects.filter",
+            side_effect=RuntimeError("lookup failed for baseuser/basepass"),
+        ):
+            result, records = self._credentials(None)
+        self.assertEqual(result, ("http://provider.example/sub", "baseuser", "basepass"))
+        self.assertTrue(any("RuntimeError" in r for r in records))
+
+    def test_transform_url_logs_no_login(self):
+        logger_name = transform_url.__globals__["logger"].name
+        cases = [
+            # (input, search, replace, expected return)
+            (
+                "http://provider.example/live/baseuser/basepass/1.ts",
+                "baseuser/basepass",
+                "user1/user1pass",
+                "http://provider.example/live/user1/user1pass/1.ts",
+            ),
+            (
+                "http://provider.example/get.php?username=baseuser&password=basepass",
+                "baseuser/basepass",
+                "user1/user1pass",
+                None,
+            ),
+            (
+                "//provider.example/live/baseuser/basepass/1.ts",
+                "^(.*)$",
+                "$1",
+                "//provider.example/live/baseuser/basepass/1.ts",
+            ),
+            ("http://h/a", "^.*$", "user1/user1pass", "user1/user1pass"),
+            # Malformed IPv6 must not make logging fail the transform.
+            ("http://h/a", "^.*$", "http://[::1/live/user1/user1pass/1.ts",
+             "http://[::1/live/user1/user1pass/1.ts"),
+            ("http://h/basepass", r"\Ubasepass", "x", None),
+        ]
+        for input_url, search, replace, expected in cases:
+            with self.subTest(input_url=input_url, search=search):
+                result, _records = self._call_without_leak(
+                    transform_url, input_url, search, replace, logger_name=logger_name
+                )
+                self.assertEqual(result, expected)
+
+
+class _Unprintable:
+    def __str__(self):
+        raise RuntimeError("no str")
+
+
+class RedactUrlForLogTests(SimpleTestCase):
+    def test_keeps_scheme_host_and_port_only(self):
+        from apps.m3u.credentials import redact_url_for_log
+
+        cases = {
+            "https://u:p@h:8080/base/live/user/pass/1234.ts?x=1": "https://h/...",
+            "http://u:p@h/get.php?username=a&password=b": "http://h/...",
+            "http://[::1]:9000/live/u/p/1.ts": "http://[::1]/...",
+            "HTTP://H:12345/live/u/12345/1.ts": "http://h/...",
+            "rtsp://cam.example/stream": "rtsp://cam.example/...",
+            "http://h:secretpass/live/u/p/1.ts": "http://h/...",
+        }
+        for url, expected in cases.items():
+            with self.subTest(url=url):
+                self.assertEqual(redact_url_for_log(url), expected)
+
+    def test_unsafe_or_malformed_shapes_become_placeholder(self):
+        from apps.m3u.credentials import UNPARSEABLE_URL, redact_url_for_log
+
+        for url in (
+            "not a url",
+            "",
+            "//h/live/user/pass/1.ts",
+            "http://[::1/live/u/p/1.ts",
+            "http://[secret]/live/u/p/1.ts",
+            "user1/user1pass",
+            "basepass://provider.example/live/u/p/1234.ts",
+            b"http://h/a",
+            _Unprintable(),
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(redact_url_for_log(url), UNPARSEABLE_URL)
+
+    def test_none_stays_none(self):
+        from apps.m3u.credentials import redact_url_for_log
+
+        self.assertIsNone(redact_url_for_log(None))
