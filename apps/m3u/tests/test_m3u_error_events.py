@@ -106,6 +106,7 @@ class EnsureM3UTerminalStatusTests(SimpleTestCase):
         with patch("apps.m3u.tasks.M3UAccount") as mock_model:
             mock_model.Status = M3UAccount.Status
             qs = MagicMock()
+            qs.exclude.return_value = qs
             mock_model.objects.filter.return_value = qs
             qs.values.return_value.first.return_value = {
                 "status": M3UAccount.Status.FETCHING,
@@ -136,6 +137,7 @@ class EnsureM3UTerminalStatusTests(SimpleTestCase):
         with patch("apps.m3u.tasks.M3UAccount") as mock_model:
             mock_model.Status = M3UAccount.Status
             qs = MagicMock()
+            qs.exclude.return_value = qs
             mock_model.objects.filter.return_value = qs
             qs.values.return_value.first.return_value = {
                 "status": M3UAccount.Status.PARSING,
@@ -159,6 +161,7 @@ class EnsureM3UTerminalStatusTests(SimpleTestCase):
         with patch("apps.m3u.tasks.M3UAccount") as mock_model:
             mock_model.Status = M3UAccount.Status
             qs = MagicMock()
+            qs.exclude.return_value = qs
             mock_model.objects.filter.return_value = qs
             qs.values.return_value.first.return_value = {
                 "status": M3UAccount.Status.SUCCESS,
@@ -183,7 +186,7 @@ class FullRefreshErrorMessagePropagationTests(SimpleTestCase):
     ):
         from apps.m3u.tasks import _refresh_single_m3u_account_impl
 
-        account = MagicMock(id=5, is_active=True, filters=MagicMock(), custom_properties={})
+        account = MagicMock(id=5, is_active=True, is_custom=False, filters=MagicMock(), custom_properties={})
         account.name = "My Account"
         mock_get_account.return_value = account
         account.filters.order_by.return_value = []
@@ -224,6 +227,7 @@ class FullRefreshErrorMessagePropagationTests(SimpleTestCase):
         account = MagicMock(
             id=5,
             is_active=True,
+            is_custom=False,
             filters=MagicMock(),
             custom_properties={},
             account_type=M3UAccount.Types.STADNARD,

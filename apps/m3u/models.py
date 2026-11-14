@@ -127,6 +127,11 @@ class M3UAccount(models.Model):
     def display_action(self):
         return "Exclude" if self.exclude else "Include"
 
+    @property
+    def is_custom(self):
+        """The built-in container for manually managed streams has no feed."""
+        return self.locked and self.name == CUSTOM_M3U_ACCOUNT_NAME
+
     @classmethod
     def get_custom_account(cls):
         return cls.objects.get(name=CUSTOM_M3U_ACCOUNT_NAME, locked=True)
