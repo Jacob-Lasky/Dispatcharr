@@ -348,76 +348,79 @@ class ReservationGuardTests(SimpleTestCase):
             for obj, name, original in reversed(guard.originals):
                 setattr(obj, name, original)
 
-    def _run_installs(self, count, first_core_check=None):
-        """Start installs on real threads, as 0.34's leader thread does beside app-ready discovery."""
-        results, errors = [], []
-
+    def _start_install(self, results, errors):
         def install():
             try:
                 results.append(rg.install())
             except Exception as error:  # surfaced by the caller
                 errors.append(error)
+        worker = threading.Thread(target=install)
+        worker.start()
+        return worker
 
-        workers = [threading.Thread(target=install) for _ in range(count)]
-        for worker in workers:
-            worker.start()
-        for worker in workers:
-            worker.join(15)
-        return results, errors
+    def _second_installer_waits_inside_first(self, first_body):
+        """Run two installs on real threads; the first holds the lock until the second waits.
+
+        0.34's leader-election thread discovers plugins beside app-ready discovery.
+        """
+        holding, second_waiting = threading.Event(), threading.Event()
+        acquire = rg._acquire_cooperatively
+        patch_core = rg._patch_core
+        calls, results, errors = [], [], []
+
+        def acquire_noting_waiter(lock):
+            if holding.is_set():
+                second_waiting.set()
+            return acquire(lock)
+
+        def patch_core_holding(guard):
+            calls.append(guard)
+            if len(calls) == 1:
+                holding.set()
+                self.assertTrue(second_waiting.wait(5), 'second installer never reached the lock')
+                first_body(guard, patch_core)
+            else:
+                patch_core(guard)
+
+        with patch('core.utils.RedisClient.get_client', return_value=self.redis), \
+             patch.object(rg, 'require_supported_core', lambda: None), \
+             patch.object(rg, '_acquire_cooperatively', acquire_noting_waiter), \
+             patch.object(rg, '_patch_core', patch_core_holding):
+            first = self._start_install(results, errors)
+            self.assertTrue(holding.wait(5))
+            second = self._start_install(results, errors)
+            first.join(10)
+            second.join(10)
+        return calls, results, errors
 
     def test_concurrent_first_installs_in_one_worker_patch_each_hook_once(self):
         from apps.channels import models
         original_move = models.Channel.update_stream_profile
-        second_started = threading.Event()
-        constructed = []
-        construct = rg.Guard.__init__
-
-        def core_check():
-            if constructed:
-                second_started.set()
-
-        def slow_first_construction(guard, *args):
-            construct(guard, *args)
-            constructed.append(guard)
-            if len(constructed) == 1:
-                # Hold the first installer mid-install until the second is running.
-                second_started.wait(5)
-                time.sleep(0.3)
-
+        calls = []
         try:
-            with patch('core.utils.RedisClient.get_client', return_value=self.redis), \
-                 patch.object(rg, 'require_supported_core', core_check), \
-                 patch.object(rg.Guard, '__init__', slow_first_construction):
-                results, errors = self._run_installs(2)
-            self.assertTrue(second_started.is_set())
+            calls, results, errors = self._second_installer_waits_inside_first(
+                lambda guard, patch_core: patch_core(guard))
             self.assertEqual(errors, [])
             self.assertEqual(len(results), 2)
             self.assertIs(results[0], results[1])
-            self.assertEqual(len(constructed), 1)
+            self.assertEqual(len(calls), 1)
             self.assertIs(models.Channel.update_stream_profile.__wrapped__, original_move)
         finally:
-            self._undo_installs(*constructed)
+            self._undo_installs(*calls)
             models.Channel.update_stream_profile = original_move
 
     def test_waiting_installer_installs_cleanly_after_the_first_rolls_back(self):
         from apps.channels import models
         original_reserve = pool.reserve_profile_slot
         original_move = models.Channel.update_stream_profile
-        patch_core = rg._patch_core
         calls = []
 
-        def first_fails_late(guard):
-            calls.append(guard)
+        def fails_after_patching(guard, patch_core):
             patch_core(guard)
-            if len(calls) == 1:
-                time.sleep(0.3)  # the second installer is waiting meanwhile
-                raise RuntimeError('scratch failure after every hook was patched')
+            raise RuntimeError('scratch failure after every hook was patched')
 
         try:
-            with patch('core.utils.RedisClient.get_client', return_value=self.redis), \
-                 patch.object(rg, 'require_supported_core', lambda: None), \
-                 patch.object(rg, '_patch_core', first_fails_late):
-                results, errors = self._run_installs(2)
+            calls, results, errors = self._second_installer_waits_inside_first(fails_after_patching)
             self.assertEqual(len(errors), 1)
             self.assertEqual(len(results), 1)
             installed = results[0]
@@ -429,6 +432,47 @@ class ReservationGuardTests(SimpleTestCase):
         finally:
             self._undo_installs(*calls)
             models.Channel.update_stream_profile = original_move
+
+    def test_greenlet_waiter_yields_to_a_holder_on_the_same_hub(self):
+        """A waiter that blocks in acquire() stops the hub, so the holder never resumes."""
+        import gevent
+        patch_core = rg._patch_core
+        calls, results, errors = [], [], []
+
+        def holder_yields(guard):
+            calls.append(guard)
+            gevent.sleep(0.05)  # e.g. a contended import or logging lock
+            patch_core(guard)
+
+        def install():
+            try:
+                results.append(rg.install())
+            except Exception as error:  # surfaced below
+                errors.append(error)
+
+        try:
+            with patch('core.utils.RedisClient.get_client', return_value=self.redis), \
+                 patch.object(rg, 'require_supported_core', lambda: None), \
+                 patch.object(rg, 'INSTALL_WAIT_SECONDS', 1, create=True), \
+                 patch.object(rg, '_patch_core', holder_yields):
+                started = time.monotonic()
+                gevent.joinall([gevent.spawn(install), gevent.spawn(install)], timeout=60)
+                elapsed = time.monotonic() - started
+            self.assertEqual(errors, [])
+            self.assertEqual(len(results), 2)
+            self.assertIs(results[0], results[1])
+            self.assertEqual(len(calls), 1)
+            self.assertLess(elapsed, 1)
+        finally:
+            self._undo_installs(*calls)
+
+    def test_guard_module_resolves_itself_when_evicted_during_import(self):
+        name = '_w466_evicted_during_import'
+        spec = importlib.util.spec_from_file_location(name, rg.__file__)
+        module = importlib.util.module_from_spec(spec)
+        # Never placed in sys.modules: the loader evicted it before _MODULE ran.
+        spec.loader.exec_module(module)
+        self.assertIs(module._MODULE, module)
 
     def test_failed_install_restores_hooks_and_publishes_nothing(self):
         from apps.channels import models

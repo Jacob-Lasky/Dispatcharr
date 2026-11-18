@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
 import ast
+import gc
 import hashlib
 import inspect
 import logging
@@ -29,8 +30,11 @@ WORKERS = 'm3u:pool_guard:workers'
 _REGISTRY = '_dispatcharr_m3u_pool_guard'
 _INSTALL_LOCK = '_dispatcharr_m3u_pool_guard_install'
 PLUGIN_KEY = 'm3u_pool_guard'
-# The loader may evict this module from sys.modules mid-install; keep our own handle.
-_MODULE = sys.modules[__name__]
+INSTALL_WAIT_SECONDS = 30
+# The loader may evict this module from sys.modules mid-import or mid-install,
+# so find our own module object from its globals when the name is gone.
+_MODULE = sys.modules.get(__name__) or next(
+    m for m in gc.get_referrers(globals()) if isinstance(m, types.ModuleType) and m.__dict__ is globals())
 # The installed Guard survives plugin module eviction on a force reload.
 _scope = getattr(sys.modules.get(_REGISTRY), 'scope_var', None) or ContextVar('m3u_reservation_owner', default=None)
 _held_locks = getattr(sys.modules.get(_REGISTRY), 'lock_var', None) or ContextVar('m3u_assignment_locks', default=frozenset())
@@ -401,16 +405,30 @@ def _install_lock():
     return holder.lock
 
 
+def _acquire_cooperatively(lock):
+    """Wait for the install lock without blocking a gevent hub.
+
+    The leader-election installer may be a real thread or a greenlet on the
+    same hub as the app-ready installer. DO NOT block in acquire(): a greenlet
+    waiting there would stop the hub, so a holder on that hub could never
+    resume. Poll non-blocking and yield between tries; the deadline fails the
+    load closed.
+    """
+    deadline = time.monotonic() + INSTALL_WAIT_SECONDS
+    while not lock.acquire(blocking=False):
+        if time.monotonic() >= deadline:
+            raise RuntimeError('M3U reservation guard install lock timed out')
+        gevent = sys.modules.get('gevent')
+        (gevent.sleep if gevent is not None else time.sleep)(0.01)
+
+
 def install():
     """Install once per web worker, preserving imported aliases across reloads."""
     # Check before even reusing an installed guard: a loader reload must never
     # silently accept an upstream update with incompatible lifecycle semantics.
     require_supported_core()
     lock = _install_lock()
-    # Nothing inside may yield to gevent: a greenlet waiting here would block
-    # its whole thread. The timeout fails this load closed instead.
-    if not lock.acquire(timeout=30):
-        raise RuntimeError('M3U reservation guard install lock timed out')
+    _acquire_cooperatively(lock)
     try:
         installed = sys.modules.get(_REGISTRY)
         if installed is not None:
@@ -443,6 +461,10 @@ def _plugin_enabled_here():
 
     Disabling calls stop() in the serving worker alone; peers learn of it by
     rediscovery, which never calls stop(), so maintenance asks the registry.
+    Limit: reclaim follows the plugin entry this worker's loader published
+    last. When two discovery scans straddle a disable or re-enable, the older
+    scan can publish last, and that worker keeps the older state until a later
+    discovery publishes.
     """
     from apps.plugins.loader import PluginManager
     loaded = PluginManager.get().get_plugin(PLUGIN_KEY)

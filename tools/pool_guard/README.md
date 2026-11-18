@@ -44,11 +44,16 @@ Ranked Matchups 1.38.5 supplies a task owner tied to its global probe lock.
 
 Dispatcharr 0.34 runs plugin discovery on its `plugin-leader-election` OS
 thread as well as at app start, so each worker can construct the plugin twice
-at once. `install()` serializes on a process-wide OS lock and publishes the
+at once. `install()` serializes on a process-wide OS lock, which a waiter polls while
+yielding to gevent, and publishes the
 guard only after every hook is in place; a failed install restores the hooks.
 Maintenance reclaims only while this worker's loader holds the plugin enabled,
 so disabling it stops reclamation in every worker after their rediscovery,
 not only in the worker that served the request.
+Reclaim follows the plugin entry this worker's loader published last. When
+two discovery scans straddle a disable or re-enable, the older scan can
+publish last, and that worker keeps the older state until a later discovery
+publishes.
 
 The existing proxy maintenance loop reclaims only reservations older than
 180 seconds whose assignment mutex, proxy metadata, owner key, client set
