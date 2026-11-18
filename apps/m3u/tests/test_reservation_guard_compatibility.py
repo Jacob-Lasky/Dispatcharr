@@ -1,4 +1,5 @@
 """Compatibility admission for the persistent plugin, without live services."""
+import ast
 import importlib.util
 from pathlib import Path
 import shutil
@@ -21,15 +22,15 @@ class ReservationGuardCompatibilityTests(TestCase):
             destination = self.root / name
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source / name, destination)
-        # The pinned image stamps 0.33.0; its source revision says 0.32.0.
-        (self.root / 'version.py').write_text("__version__ = '0.33.0'\n")
+        # The pinned image stamps 0.34.1; its source revision says 0.34.0.
+        (self.root / 'version.py').write_text("__version__ = '0.34.1'\n")
 
     def test_pinned_core_is_accepted(self):
         self.assertEqual(guard_module.compatibility_errors(self.root), [])
 
     def test_upstream_version_update_is_refused(self):
-        (self.root / 'version.py').write_text("__version__ = '0.34.0'\n")
-        self.assertIn('expected 0.33.0', guard_module.compatibility_errors(self.root)[0])
+        (self.root / 'version.py').write_text("__version__ = '0.35.0'\n")
+        self.assertIn('expected 0.34.1', guard_module.compatibility_errors(self.root)[0])
 
     def test_every_hooked_source_change_is_refused_even_at_same_version(self):
         for name in guard_module.CORE_SHA256:
@@ -96,3 +97,11 @@ class ReservationGuardCompatibilityTests(TestCase):
         with patch.dict(sys.modules, modules), \
              patch.object(guard_module, 'compatibility_errors', return_value=['version mismatch']):
             self.assertEqual(adapter.Plugin.__new__(adapter.Plugin).run('status')['status'], 'error')
+
+    def test_adapter_manifest_and_guard_versions_agree(self):
+        import json
+        tools = Path(__file__).resolve().parents[3] / 'tools/pool_guard'
+        manifest = json.loads((tools / 'plugin.json').read_text())['version']
+        adapter = next(node.value.value for node in ast.walk(ast.parse((tools / 'plugin.py').read_text()))
+                       if isinstance(node, ast.Assign) and getattr(node.targets[0], 'id', None) == 'version')
+        self.assertEqual({manifest, adapter, guard_module.VERSION}, {guard_module.VERSION})

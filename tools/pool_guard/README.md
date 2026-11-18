@@ -1,4 +1,4 @@
-This adapter installs the core reservation guard in existing Dispatcharr 0.33
+This adapter installs the core reservation guard in existing Dispatcharr 0.34.1
 web workers through the plugin loader, without restarting an active stream.
 `apps/m3u/reservation_guard.py` is the implementation; copy that file alongside
 this directory's `plugin.py`, `plugin.json` and `__init__.py` into the persistent
@@ -12,15 +12,15 @@ container recreation. No image-layer core file, fork image, startup script or
 additional mount is used. The loader installs the guard in each web worker
 at startup. This is a runtime adapter for the core fix, not a fork image.
 
-Version 0.1.1 checks the image's `version.py` and SHA-256 of all nine hooked
+Version 0.2.0 checks the image's `version.py` and SHA-256 of all nine hooked
 core/loader source files before installing or re-enabling the guard. Only
-Dispatcharr 0.33.0 with the source contract from upstream revision
-`e71bd6cd50931e1381f85521b7f914c47f9528b7` is admitted. An upstream version or
+Dispatcharr 0.34.1 with the source contract from upstream revision
+`83f82bf388b72ec1e6cc356f1015a9812228b424` is admitted. An upstream version or
 source mismatch logs `m3u_slot guard refused incompatible core` and refuses
 installation, leaving the updated upstream implementation intact. Do not
 add new supported hashes without validating the lifecycle against that build.
-The image labels say 0.33.0 although that revision's source `version.py` says
-0.32.0; the version check uses the image's stamped version.
+The image labels say 0.34.1 although that revision's source `version.py` says
+0.34.0; the version check uses the image's stamped version.
 
 The plugin's Status action reports compatibility, loaded source path,
 `reclamation_enabled` and `grace_seconds`. Startup/reload logs include

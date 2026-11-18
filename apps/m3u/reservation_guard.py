@@ -1,6 +1,6 @@
-"""Owned M3U reservations for Dispatcharr 0.33, including its live reload adapter.
+"""Owned M3U reservations for Dispatcharr 0.34.1, including its live reload adapter.
 
-The 0.33 reconnect path can reserve twice before publishing one channel token.
+The 0.33-0.34.1 reconnect path can reserve twice before publishing one channel token.
 Keep assignment changes under a cross-worker lock, and commit each counter change
 with a durable owner record. Maintenance only reclaims owners with no proxy,
 owner lock or clients; it never stops a channel or guesses from throughput.
@@ -21,7 +21,7 @@ import time
 import uuid
 from pathlib import Path
 
-VERSION = '0.1.0'
+VERSION = '0.2.0'  # Keep equal to tools/pool_guard/plugin.json and plugin.py.
 GRACE_SECONDS = 180
 INDEX = 'm3u:owned_slots'
 WORKERS = 'm3u:pool_guard:workers'
@@ -31,20 +31,20 @@ _scope = getattr(sys.modules.get(_REGISTRY), 'scope_var', None) or ContextVar('m
 _held_locks = getattr(sys.modules.get(_REGISTRY), 'lock_var', None) or ContextVar('m3u_assignment_locks', default=frozenset())
 logger = logging.getLogger('apps.m3u.reservation_guard')
 
-SUPPORTED_VERSION = '0.33.0'
-UPSTREAM_REVISION = 'e71bd6cd50931e1381f85521b7f914c47f9528b7'
+SUPPORTED_VERSION = '0.34.1'
+UPSTREAM_REVISION = '83f82bf388b72ec1e6cc356f1015a9812228b424'
 # Pin every core file whose functions or loader contract the adapter relies on.
 # Image builds set version.py independently of the source revision.
 CORE_SHA256 = {
     'apps/m3u/connection_pool.py': 'e79c8d663818068d71b23b2404e9a313ce566bd6a51d4ae217211ac72fc83bfb',
-    'apps/channels/models.py': 'f76cd4a71a2997b04ce836fc3191d56755c26b88fcdfb9caec85b3c67d119f04',
+    'apps/channels/models.py': 'dcfba15cf91c49260b3dae1227bd16166c6907e4e3be87d828da099473f30408',
     'apps/proxy/live_proxy/client_manager.py': '4d0c6c7a4a60fe7d7f97794b4c28b3b9d9703f2772964315a802a3fc4ac2cc9d',
     'apps/proxy/live_proxy/slot_release.py': '32134f939f7e53cd562140f9057df571e3b1d3852f4d806af64f7ad16723f7ac',
-    'apps/proxy/live_proxy/views.py': '68d3b4097536742945fcb9eccd2d5f95f1cedc0774367d61ba21f33b42bd29c8',
-    'apps/proxy/live_proxy/server.py': 'f6aecdd437c1931bc5bb18f2f005b000d32f4e695d1a85ef131550462806d4ea',
+    'apps/proxy/live_proxy/views.py': '7ce96b220e246d05f74690b58a7bd765c2c41d316487aae471a5e46ba0cc1cf8',
+    'apps/proxy/live_proxy/server.py': 'd9e43ec4899432a2eed2b31bd17cee02c36bcfc33dfd821194bdb8542b794ebf',
     'apps/proxy/live_proxy/output/ts/generator.py': 'ebb47c35ce4fa6ffc3baf1d9545089077da9ecafc9cc25f3dc8c326a0aa08904',
-    'apps/proxy/live_proxy/output/fmp4/generator.py': 'dea974dc79ff271b3e973f27571e0c8c2fdff03121a3b3ad8589da415b8d8f54',
-    'apps/plugins/loader.py': 'f6ad90014f5b5f2eb25d2382e1d6c9c2749c6c69202621a445c3a56193da2fbe',
+    'apps/proxy/live_proxy/output/fmp4/generator.py': 'a337030b2b560c54eac013ee2c26aaa4a974f696b55d2ef3d7d2023298e2af5e',
+    'apps/plugins/loader.py': '84d6443927e97a1973ce83cd99766dc7d0e6f768e9ad0d9dceba1ba3011ac719',
 }
 
 

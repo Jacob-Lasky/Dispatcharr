@@ -1,11 +1,11 @@
-"""No-restart adapter for the core reservation guard on Dispatcharr 0.33."""
+"""No-restart adapter for the core reservation guard on Dispatcharr 0.34.1."""
 import os
 import sys
 
 
 class Plugin:
     name = 'M3U Reservation Guard'
-    version = '0.1.1'
+    version = '0.2.0'
     description = 'Tracks provider slot ownership and reclaims abandoned reservations.'
     actions = [{'id': 'status', 'label': 'Status'}]
 
