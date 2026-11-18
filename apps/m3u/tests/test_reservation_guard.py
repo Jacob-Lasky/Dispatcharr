@@ -440,11 +440,14 @@ class ReservationGuardTests(SimpleTestCase):
         """A waiter that blocks in acquire() stops the hub, so the holder never resumes."""
         import gevent
         patch_core = rg._patch_core
-        calls, results, errors = [], [], []
+        calls, results, errors, holder_pauses = [], [], [], []
 
         def holder_yields(guard):
             calls.append(guard)
+            paused = time.monotonic()
             gevent.sleep(0.05)  # e.g. a contended import or logging lock
+            # A waiter that blocks the hub delays this resume by however long it blocks.
+            holder_pauses.append(time.monotonic() - paused)
             patch_core(guard)
 
         def install():
@@ -463,6 +466,7 @@ class ReservationGuardTests(SimpleTestCase):
             self.assertEqual(len(results), 2)
             self.assertIs(results[0], results[1])
             self.assertEqual(len(calls), 1)
+            self.assertLess(holder_pauses[0], 0.5, 'the waiting greenlet stalled the hub')
         finally:
             self._undo_installs(*calls)
 
