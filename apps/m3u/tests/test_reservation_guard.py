@@ -340,3 +340,56 @@ class ReservationGuardTests(SimpleTestCase):
             if guard:
                 for obj, name, original in reversed(guard.originals):
                     setattr(obj, name, original)
+
+    def test_concurrent_first_installs_in_one_worker_patch_each_hook_once(self):
+        """0.34 runs plugin discovery on its leader thread beside app-ready discovery."""
+        from apps.channels import models
+        original_move = models.Channel.update_stream_profile
+        # Hold both threads after the compatibility check and before either
+        # publishes, the window a GIL switch can open between two discoveries.
+        both_checked = threading.Barrier(2, timeout=5)
+        results, errors = [], []
+        construct = rg.Guard.__init__
+
+        def constructed(guard, *args):
+            construct(guard, *args)
+            both_checked.wait()
+
+        def install():
+            try:
+                results.append(rg.install())
+            except Exception as error:  # surfaced below
+                errors.append(error)
+
+        try:
+            with patch('core.utils.RedisClient.get_client', return_value=self.redis), \
+                 patch.object(rg, 'require_supported_core', lambda: None), \
+                 patch.object(rg.Guard, '__init__', constructed):
+                workers = [threading.Thread(target=install) for _ in range(2)]
+                for worker in workers:
+                    worker.start()
+                for worker in workers:
+                    worker.join(10)
+            self.assertEqual(errors, [])
+            self.assertEqual(len(results), 2)
+            self.assertIs(results[0], results[1])
+            self.assertIs(models.Channel.update_stream_profile.__wrapped__, original_move)
+        finally:
+            guard = sys.modules.pop(rg._REGISTRY, None)
+            for installed in {id(g): g for g in results + ([guard] if guard else [])}.values():
+                for obj, name, original in reversed(installed.originals):
+                    setattr(obj, name, original)
+            models.Channel.update_stream_profile = original_move
+
+    def test_failed_install_restores_hooks_and_releases_claim(self):
+        from apps.channels import models
+        original_get = models.Channel.get_stream
+        with patch('core.utils.RedisClient.get_client', return_value=self.redis), \
+             patch.object(rg, 'require_supported_core', lambda: None), \
+             patch('apps.proxy.live_proxy.output.fmp4.generator.FMP4StreamGenerator._cleanup', None):
+            # Fails late, after the pool, model and TS generator hooks are in place.
+            with self.assertRaises(TypeError):
+                rg.install()
+        self.assertNotIn(rg._REGISTRY, sys.modules)
+        self.assertIs(models.Channel.get_stream, original_get)
+        self.assertIs(pool.reserve_profile_slot, self.guard.legacy_reserve)

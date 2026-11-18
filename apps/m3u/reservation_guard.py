@@ -377,15 +377,34 @@ def install():
     # Check before even reusing an installed guard: a loader reload must never
     # silently accept an upstream update with incompatible lifecycle semantics.
     require_supported_core()
-    if _REGISTRY in sys.modules:
-        guard = sys.modules[_REGISTRY]
-        guard.reclamation_enabled = True
-        return _report_active(guard)
+    from apps.m3u import connection_pool as pool
+    guard = Guard(pool)
+    # 0.34's plugin-leader-election OS thread discovers plugins while app-ready
+    # discovery runs, so two installs can start at once in one worker. One
+    # atomic claim picks the installer; DO NOT test-then-set, which lets both
+    # wrap every hook twice.
+    installed = sys.modules.get(_REGISTRY) or sys.modules.setdefault(_REGISTRY, guard)
+    if installed is not guard:
+        installed.reclamation_enabled = True
+        return _report_active(installed)
+    try:
+        _patch_core(guard)
+    except BaseException:
+        for obj, name, original in reversed(guard.originals):
+            setattr(obj, name, original)
+        sys.modules.pop(_REGISTRY, None)
+        raise
+    from core.utils import RedisClient
+    RedisClient.get_client().hset(WORKERS, worker_id(), VERSION)
+    logger.info('m3u_slot guard installed worker=%s version=%s', worker_id(), VERSION)
+    return _report_active(guard)
+
+
+def _patch_core(guard):
     from apps.m3u import connection_pool as pool
     from apps.channels import models
     from apps.proxy.live_proxy import client_manager, slot_release, views, server
     from core.utils import RedisClient
-    guard = Guard(pool)
     reserve, release = guard.reserve, guard.release
     for obj, name, function in [(pool, 'reserve_profile_slot', reserve), (models, 'reserve_profile_slot', reserve),
                                 (pool, 'release_profile_slot', release), (models, 'release_profile_slot', release),
@@ -476,7 +495,3 @@ def install():
         except Exception:
             logger.exception('m3u_slot reclaim failed; no forced counter reset')
     guard.replace(server.ProxyServer, '_check_orphaned_metadata', cleanup)
-    sys.modules[_REGISTRY] = guard
-    RedisClient.get_client().hset(WORKERS, worker_id(), VERSION)
-    logger.info('m3u_slot guard installed worker=%s version=%s', worker_id(), VERSION)
-    return _report_active(guard)
