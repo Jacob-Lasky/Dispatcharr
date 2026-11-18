@@ -341,47 +341,96 @@ class ReservationGuardTests(SimpleTestCase):
                 for obj, name, original in reversed(guard.originals):
                     setattr(obj, name, original)
 
-    def test_concurrent_first_installs_in_one_worker_patch_each_hook_once(self):
-        """0.34 runs plugin discovery on its leader thread beside app-ready discovery."""
+    def _undo_installs(self, *guards):
         from apps.channels import models
-        original_move = models.Channel.update_stream_profile
-        # Hold both threads after the compatibility check and before either
-        # publishes, the window a GIL switch can open between two discoveries.
-        both_checked = threading.Barrier(2, timeout=5)
-        results, errors = [], []
-        construct = rg.Guard.__init__
+        registered = sys.modules.pop(rg._REGISTRY, None)
+        for guard in {id(g): g for g in (*guards, registered) if g}.values():
+            for obj, name, original in reversed(guard.originals):
+                setattr(obj, name, original)
 
-        def constructed(guard, *args):
-            construct(guard, *args)
-            both_checked.wait()
+    def _run_installs(self, count, first_core_check=None):
+        """Start installs on real threads, as 0.34's leader thread does beside app-ready discovery."""
+        results, errors = [], []
 
         def install():
             try:
                 results.append(rg.install())
-            except Exception as error:  # surfaced below
+            except Exception as error:  # surfaced by the caller
                 errors.append(error)
+
+        workers = [threading.Thread(target=install) for _ in range(count)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(15)
+        return results, errors
+
+    def test_concurrent_first_installs_in_one_worker_patch_each_hook_once(self):
+        from apps.channels import models
+        original_move = models.Channel.update_stream_profile
+        second_started = threading.Event()
+        constructed = []
+        construct = rg.Guard.__init__
+
+        def core_check():
+            if constructed:
+                second_started.set()
+
+        def slow_first_construction(guard, *args):
+            construct(guard, *args)
+            constructed.append(guard)
+            if len(constructed) == 1:
+                # Hold the first installer mid-install until the second is running.
+                second_started.wait(5)
+                time.sleep(0.3)
+
+        try:
+            with patch('core.utils.RedisClient.get_client', return_value=self.redis), \
+                 patch.object(rg, 'require_supported_core', core_check), \
+                 patch.object(rg.Guard, '__init__', slow_first_construction):
+                results, errors = self._run_installs(2)
+            self.assertTrue(second_started.is_set())
+            self.assertEqual(errors, [])
+            self.assertEqual(len(results), 2)
+            self.assertIs(results[0], results[1])
+            self.assertEqual(len(constructed), 1)
+            self.assertIs(models.Channel.update_stream_profile.__wrapped__, original_move)
+        finally:
+            self._undo_installs(*constructed)
+            models.Channel.update_stream_profile = original_move
+
+    def test_waiting_installer_installs_cleanly_after_the_first_rolls_back(self):
+        from apps.channels import models
+        original_reserve = pool.reserve_profile_slot
+        original_move = models.Channel.update_stream_profile
+        patch_core = rg._patch_core
+        calls = []
+
+        def first_fails_late(guard):
+            calls.append(guard)
+            patch_core(guard)
+            if len(calls) == 1:
+                time.sleep(0.3)  # the second installer is waiting meanwhile
+                raise RuntimeError('scratch failure after every hook was patched')
 
         try:
             with patch('core.utils.RedisClient.get_client', return_value=self.redis), \
                  patch.object(rg, 'require_supported_core', lambda: None), \
-                 patch.object(rg.Guard, '__init__', constructed):
-                workers = [threading.Thread(target=install) for _ in range(2)]
-                for worker in workers:
-                    worker.start()
-                for worker in workers:
-                    worker.join(10)
-            self.assertEqual(errors, [])
-            self.assertEqual(len(results), 2)
-            self.assertIs(results[0], results[1])
+                 patch.object(rg, '_patch_core', first_fails_late):
+                results, errors = self._run_installs(2)
+            self.assertEqual(len(errors), 1)
+            self.assertEqual(len(results), 1)
+            installed = results[0]
+            self.assertIs(sys.modules[rg._REGISTRY], installed)
+            self.assertIs(installed, calls[1])
+            self.assertIs(installed.legacy_reserve, original_reserve)
+            self.assertEqual(pool.reserve_profile_slot, installed.reserve)
             self.assertIs(models.Channel.update_stream_profile.__wrapped__, original_move)
         finally:
-            guard = sys.modules.pop(rg._REGISTRY, None)
-            for installed in {id(g): g for g in results + ([guard] if guard else [])}.values():
-                for obj, name, original in reversed(installed.originals):
-                    setattr(obj, name, original)
+            self._undo_installs(*calls)
             models.Channel.update_stream_profile = original_move
 
-    def test_failed_install_restores_hooks_and_releases_claim(self):
+    def test_failed_install_restores_hooks_and_publishes_nothing(self):
         from apps.channels import models
         original_get = models.Channel.get_stream
         with patch('core.utils.RedisClient.get_client', return_value=self.redis), \
@@ -393,3 +442,61 @@ class ReservationGuardTests(SimpleTestCase):
         self.assertNotIn(rg._REGISTRY, sys.modules)
         self.assertIs(models.Channel.get_stream, original_get)
         self.assertIs(pool.reserve_profile_slot, self.guard.legacy_reserve)
+
+    def test_worker_registration_failure_keeps_the_complete_install(self):
+        failing = N(hset=lambda *args: (_ for _ in ()).throw(redis.ConnectionError('scratch')))
+        try:
+            with patch('core.utils.RedisClient.get_client', return_value=failing), \
+                 patch.object(rg, 'require_supported_core', lambda: None), \
+                 self.assertLogs('apps.m3u.reservation_guard', level='ERROR'):
+                guard = rg.install()
+            self.assertIs(sys.modules[rg._REGISTRY], guard)
+            self.assertEqual(pool.reserve_profile_slot, guard.reserve)
+        finally:
+            self._undo_installs()
+
+    def test_guard_keeps_its_module_after_loader_eviction(self):
+        name = rg.__name__
+        try:
+            sys.modules.pop(name)
+            self.assertIs(rg.Guard(pool).module, rg)
+        finally:
+            sys.modules[name] = rg
+
+    def test_maintenance_reclaims_only_while_this_worker_holds_the_enabled_plugin(self):
+        from apps.plugins.loader import PluginManager
+        for loaded, expected in ((None, False), (N(instance=None), False), (N(instance=object()), True)):
+            with self.subTest(loaded=loaded), \
+                 patch.object(PluginManager, 'get', return_value=N(get_plugin={rg.PLUGIN_KEY: loaded}.get)):
+                self.assertIs(rg._plugin_enabled_here(), expected)
+        from apps.proxy.live_proxy import server
+        stock_checks = []
+        try:
+            with patch('core.utils.RedisClient.get_client', return_value=self.redis), \
+                 patch.object(rg, 'require_supported_core', lambda: None), \
+                 patch.object(server.ProxyServer, '_check_orphaned_metadata', stock_checks.append):
+                guard = rg.install()
+                proxy = N(redis_client=self.redis)
+                for enabled in (False, True):
+                    with self.subTest(enabled=enabled), \
+                         patch.object(rg, '_plugin_enabled_here', return_value=enabled), \
+                         patch.object(guard, 'reclaim') as reclaim:
+                        server.ProxyServer._check_orphaned_metadata(proxy)
+                        self.assertEqual(reclaim.called, enabled)
+            self.assertEqual(stock_checks, [proxy, proxy])
+        finally:
+            self._undo_installs()
+
+    def test_release_never_takes_a_credential_slot_its_profile_no_longer_counts(self):
+        with patch.object(pool, 'get_enforced_server_group_for_profile', return_value=object()), \
+             patch.object(pool, '_credential_counter_key', return_value='server_group_connections:scratch'):
+            self.assertTrue(self.reserve()[0])
+            self.profile.id = 5
+            self.assertTrue(self.reserve('channel:second')[0])
+        # An unpaired stock release (the 0.34 VOD resume path) already took profile 4's slot.
+        self.assertTrue(pool.release_profile_slot(4, self.redis))
+        self.assertEqual(int(self.redis.get('server_group_connections:scratch')), 1)
+        with rg.scope('channel:test'):
+            self.guard.release(4, self.redis)
+        # Profile 5's channel still holds the shared credential slot.
+        self.assertEqual(int(self.redis.get('server_group_connections:scratch')), 1)

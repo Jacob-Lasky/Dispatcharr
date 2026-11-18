@@ -18,6 +18,7 @@ import os
 import socket
 import sys
 import time
+import types
 import uuid
 from pathlib import Path
 
@@ -26,6 +27,10 @@ GRACE_SECONDS = 180
 INDEX = 'm3u:owned_slots'
 WORKERS = 'm3u:pool_guard:workers'
 _REGISTRY = '_dispatcharr_m3u_pool_guard'
+_INSTALL_LOCK = '_dispatcharr_m3u_pool_guard_install'
+PLUGIN_KEY = 'm3u_pool_guard'
+# The loader may evict this module from sys.modules mid-install; keep our own handle.
+_MODULE = sys.modules[__name__]
 # The installed Guard survives plugin module eviction on a force reload.
 _scope = getattr(sys.modules.get(_REGISTRY), 'scope_var', None) or ContextVar('m3u_reservation_owner', default=None)
 _held_locks = getattr(sys.modules.get(_REGISTRY), 'lock_var', None) or ContextVar('m3u_assignment_locks', default=frozenset())
@@ -127,11 +132,14 @@ if ARGV[2] == 'reclaim' then
 end
 local profile = redis.call('HGET', KEYS[1], 'profile')
 local counter = 'profile_connections:' .. profile
-if redis.call('HGET', KEYS[1], 'counted') == '1' and tonumber(redis.call('GET', counter) or '0') > 0 then
+local profile_held = tonumber(redis.call('GET', counter) or '0') > 0
+if redis.call('HGET', KEYS[1], 'counted') == '1' and profile_held then
  redis.call('DECR', counter)
 end
+-- Same rule as stock release_profile_slot: the credential slot goes only with a
+-- held profile slot, so an earlier unpaired release cannot drain a sibling's.
 local credential = redis.call('HGET', KEYS[1], 'credential')
-if credential and credential ~= '' and tonumber(redis.call('GET', credential) or '0') > 0 then
+if profile_held and credential and credential ~= '' and tonumber(redis.call('GET', credential) or '0') > 0 then
  redis.call('DECR', credential)
 end
 if tonumber(redis.call('GET', counter) or '0') <= 0 then redis.call('DEL', 'profile_credential_release:' .. profile) end
@@ -220,7 +228,7 @@ class Guard:
         self.pool = pool
         self.scope_var = _scope
         self.lock_var = _held_locks
-        self.module = sys.modules[__name__]
+        self.module = _MODULE
         self.reclaim_offset = 0
         self.legacy_reserve = pool.reserve_profile_slot
         self.legacy_release = pool.release_profile_slot
@@ -372,32 +380,73 @@ def _scoped(original, identity):
     return wrapped
 
 
+def _install_lock():
+    """One OS-level lock per process that survives the loader evicting this module.
+
+    0.34's plugin-leader-election OS thread discovers plugins while app-ready
+    discovery runs, so two installs can start at once in one worker. A gevent
+    lock does not exclude a real thread, so take the unpatched primitive.
+    """
+    holder = sys.modules.get(_INSTALL_LOCK)
+    if holder is None:
+        try:
+            from gevent.monkey import get_original
+            allocate = get_original('_thread', 'allocate_lock')
+        except ImportError:
+            import _thread
+            allocate = _thread.allocate_lock
+        candidate = types.ModuleType(_INSTALL_LOCK)
+        candidate.lock = allocate()
+        holder = sys.modules.setdefault(_INSTALL_LOCK, candidate)
+    return holder.lock
+
+
 def install():
     """Install once per web worker, preserving imported aliases across reloads."""
     # Check before even reusing an installed guard: a loader reload must never
     # silently accept an upstream update with incompatible lifecycle semantics.
     require_supported_core()
-    from apps.m3u import connection_pool as pool
-    guard = Guard(pool)
-    # 0.34's plugin-leader-election OS thread discovers plugins while app-ready
-    # discovery runs, so two installs can start at once in one worker. One
-    # atomic claim picks the installer; DO NOT test-then-set, which lets both
-    # wrap every hook twice.
-    installed = sys.modules.get(_REGISTRY) or sys.modules.setdefault(_REGISTRY, guard)
-    if installed is not guard:
-        installed.reclamation_enabled = True
-        return _report_active(installed)
+    lock = _install_lock()
+    # Nothing inside may yield to gevent: a greenlet waiting here would block
+    # its whole thread. The timeout fails this load closed instead.
+    if not lock.acquire(timeout=30):
+        raise RuntimeError('M3U reservation guard install lock timed out')
     try:
-        _patch_core(guard)
-    except BaseException:
-        for obj, name, original in reversed(guard.originals):
-            setattr(obj, name, original)
-        sys.modules.pop(_REGISTRY, None)
-        raise
+        installed = sys.modules.get(_REGISTRY)
+        if installed is not None:
+            installed.reclamation_enabled = True
+            return _report_active(installed)
+        from apps.m3u import connection_pool as pool
+        guard = Guard(pool)
+        try:
+            _patch_core(guard)
+        except BaseException:
+            for obj, name, original in reversed(guard.originals):
+                setattr(obj, name, original)
+            raise
+        # Publish only a complete install; a waiting installer then reuses it.
+        sys.modules[_REGISTRY] = guard
+    finally:
+        lock.release()
     from core.utils import RedisClient
-    RedisClient.get_client().hset(WORKERS, worker_id(), VERSION)
+    try:
+        RedisClient.get_client().hset(WORKERS, worker_id(), VERSION)
+    except Exception:
+        # Diagnostics only; the hooks above are already complete and active.
+        logger.exception('m3u_slot guard could not register worker=%s', worker_id())
     logger.info('m3u_slot guard installed worker=%s version=%s', worker_id(), VERSION)
     return _report_active(guard)
+
+
+def _plugin_enabled_here():
+    """False once this worker's loader holds the plugin only as a disabled placeholder.
+
+    Disabling calls stop() in the serving worker alone; peers learn of it by
+    rediscovery, which never calls stop(), so maintenance asks the registry.
+    """
+    from apps.plugins.loader import PluginManager
+    loaded = PluginManager.get().get_plugin(PLUGIN_KEY)
+    return bool(loaded and loaded.instance)
 
 
 def _patch_core(guard):
@@ -491,7 +540,8 @@ def _patch_core(guard):
     def cleanup(proxy):
         original_cleanup(proxy)
         try:
-            guard.reclaim(proxy.redis_client)
+            if _plugin_enabled_here():
+                guard.reclaim(proxy.redis_client)
         except Exception:
             logger.exception('m3u_slot reclaim failed; no forced counter reset')
     guard.replace(server.ProxyServer, '_check_orphaned_metadata', cleanup)

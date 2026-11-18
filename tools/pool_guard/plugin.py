@@ -35,7 +35,9 @@ class Plugin:
 
     def stop(self, context=None):
         # No threads are created. Keep ownership-aware release until in-flight
-        # leases drain; disabling only stops reclamation in this worker.
+        # leases drain. This stops reclamation in the worker serving the
+        # disable; peers stop once rediscovery leaves them a disabled
+        # placeholder (reservation_guard._plugin_enabled_here).
         guard = sys.modules.get('_dispatcharr_m3u_pool_guard')
         if guard:
             guard.reclamation_enabled = False
