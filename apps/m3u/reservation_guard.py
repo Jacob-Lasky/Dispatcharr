@@ -53,6 +53,7 @@ CORE_SHA256 = {
     'apps/proxy/live_proxy/server.py': 'd9e43ec4899432a2eed2b31bd17cee02c36bcfc33dfd821194bdb8542b794ebf',
     'apps/proxy/live_proxy/output/ts/generator.py': 'ebb47c35ce4fa6ffc3baf1d9545089077da9ecafc9cc25f3dc8c326a0aa08904',
     'apps/proxy/live_proxy/output/fmp4/generator.py': 'a337030b2b560c54eac013ee2c26aaa4a974f696b55d2ef3d7d2023298e2af5e',
+    'apps/timeshift/views.py': '75852d0ec478b81fb758241e20101ce5d37e47636337845e18f8823037726b1a',
     'apps/plugins/loader.py': '84d6443927e97a1973ce83cd99766dc7d0e6f768e9ad0d9dceba1ba3011ac719',
 }
 
@@ -387,9 +388,11 @@ def _scoped(original, identity):
 def _install_lock():
     """One OS-level lock per process that survives the loader evicting this module.
 
-    0.34's plugin-leader-election OS thread discovers plugins while app-ready
-    discovery runs, so two installs can start at once in one worker. A gevent
-    lock does not exclude a real thread, so take the unpatched primitive.
+    0.34's plugin-leader-election thread discovers plugins while app-ready
+    discovery runs, so two installs can start at once in one worker. That
+    thread may be a real thread or, under uWSGI's gevent patching, a greenlet.
+    A gevent lock does not exclude a real thread, so take the unpatched
+    primitive and wait on it cooperatively (_acquire_cooperatively).
     """
     holder = sys.modules.get(_INSTALL_LOCK)
     if holder is None:
@@ -461,8 +464,9 @@ def _plugin_enabled_here():
 
     Disabling calls stop() in the serving worker alone; peers learn of it by
     rediscovery, which never calls stop(), so maintenance asks the registry.
-    Limit: reclaim follows the plugin entry this worker's loader published
-    last. When two discovery scans straddle a disable or re-enable, the older
+    Limit: the check runs once per maintenance pass, so a pass that began
+    before a disable finishes its batch. Reclaim follows the plugin entry this
+    worker's loader published last. When two discovery scans straddle a disable or re-enable, the older
     scan can publish last, and that worker keeps the older state until a later
     discovery publishes.
     """

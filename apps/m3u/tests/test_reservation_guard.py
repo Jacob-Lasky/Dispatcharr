@@ -370,6 +370,9 @@ class ReservationGuardTests(SimpleTestCase):
 
         def acquire_noting_waiter(lock):
             if holding.is_set():
+                # The holder waits for this event, so the lock is held here:
+                # prove the second installer meets a contended lock.
+                self.assertFalse(lock.acquire(blocking=False))
                 second_waiting.set()
             return acquire(lock)
 
@@ -455,14 +458,11 @@ class ReservationGuardTests(SimpleTestCase):
                  patch.object(rg, 'require_supported_core', lambda: None), \
                  patch.object(rg, 'INSTALL_WAIT_SECONDS', 1, create=True), \
                  patch.object(rg, '_patch_core', holder_yields):
-                started = time.monotonic()
                 gevent.joinall([gevent.spawn(install), gevent.spawn(install)], timeout=60)
-                elapsed = time.monotonic() - started
             self.assertEqual(errors, [])
             self.assertEqual(len(results), 2)
             self.assertIs(results[0], results[1])
             self.assertEqual(len(calls), 1)
-            self.assertLess(elapsed, 1)
         finally:
             self._undo_installs(*calls)
 

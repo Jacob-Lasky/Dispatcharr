@@ -12,8 +12,8 @@ container recreation. No image-layer core file, fork image, startup script or
 additional mount is used. The loader installs the guard in each web worker
 at startup. This is a runtime adapter for the core fix, not a fork image.
 
-Version 0.2.0 checks the image's `version.py` and SHA-256 of all nine hooked
-core/loader source files before installing or re-enabling the guard. Only
+Version 0.2.0 checks the `__version__` stamped in the image's `version.py`
+and the SHA-256 of all ten hooked core/loader source files before installing or re-enabling the guard. Only
 Dispatcharr 0.34.1 with the source contract from upstream revision
 `83f82bf388b72ec1e6cc356f1015a9812228b424` is admitted. An upstream version or
 source mismatch logs `m3u_slot guard refused incompatible core` and refuses
@@ -42,14 +42,16 @@ owner record keep the original release path. VOD and catch-up retain their
 session managers' existing reservation pairing and are logged as unbound.
 Ranked Matchups 1.38.5 supplies a task owner tied to its global probe lock.
 
-Dispatcharr 0.34 runs plugin discovery on its `plugin-leader-election` OS
+Dispatcharr 0.34 runs plugin discovery on its `plugin-leader-election`
 thread as well as at app start, so each worker can construct the plugin twice
-at once. `install()` serializes on a process-wide OS lock, which a waiter polls while
-yielding to gevent, and publishes the
-guard only after every hook is in place; a failed install restores the hooks.
+at once. Under uWSGI's gevent patching that thread can start as a greenlet on
+the same hub. `install()` serializes on a process-wide native lock, which a
+waiter polls while yielding to gevent, and publishes the guard only after
+every hook is in place; a failed install restores the hooks.
 Maintenance reclaims only while this worker's loader holds the plugin enabled,
 so disabling it stops reclamation in every worker after their rediscovery,
-not only in the worker that served the request.
+not only in the worker that served the request. The check runs once per
+maintenance pass, so a pass that began before a disable finishes its batch.
 Reclaim follows the plugin entry this worker's loader published last. When
 two discovery scans straddle a disable or re-enable, the older scan can
 publish last, and that worker keeps the older state until a later discovery
