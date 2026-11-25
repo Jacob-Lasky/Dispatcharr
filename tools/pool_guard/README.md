@@ -16,7 +16,7 @@ container recreation. No image-layer core file, fork image, startup script or
 additional mount is used. The loader installs the guard in each web worker
 at startup. This is a runtime adapter for the core fix, not a fork image.
 
-Version 0.2.1 checks the `__version__` stamped in the image's `version.py`
+The guard checks the `__version__` stamped in the image's `version.py`
 and the SHA-256 of all ten hooked core/loader source files before installing or re-enabling the guard. Only
 Dispatcharr 0.34.1 with the source contract from upstream revision
 `83f82bf388b72ec1e6cc356f1015a9812228b424` is admitted. An upstream version or
@@ -26,8 +26,23 @@ add new supported hashes without validating the lifecycle against that build.
 The image labels say 0.34.1 although that revision's source `version.py` says
 0.34.0; the version check uses the image's stamped version.
 
+The manifest is version 2 (Dispatcharr 0.34's sandboxed plugin contract) and
+declares one capability, `proxy_internals`, the disclosure for hooking the live
+proxy's slot accounting. Dispatcharr asks an admin to approve it when the
+plugin is enabled. The guard deliberately does not use 0.34's leader-elected
+service (`on_leader_acquired`): it is not a background service but a set of
+hooks every web worker that serves streams must carry, so it installs in each
+worker from `Plugin.__init__`, as before. Installing creates no thread, writes
+no files and needs no plugin data directory.
+
+0.2.2 changed only the manifest, the Status output and the version string, so
+its guard logic is the same as 0.2.1's. Deploying it over a running 0.2.1 needs a plugin reload,
+not a restart. Status reports both `version` (the adapter) and
+`guard_version` (the guard each worker actually runs); they differ until that
+worker next starts.
+
 The plugin's Status action reports compatibility, loaded source path,
-`reclamation_enabled` and `grace_seconds`. Startup/reload logs include
+`guard_version`, `reclamation_enabled` and `grace_seconds`. Startup/reload logs include
 `guard active ... reclamation_enabled=True grace_seconds=180`; reservation
 events separately include owner, client ID, profile and generation token.
 

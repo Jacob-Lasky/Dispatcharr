@@ -23,7 +23,7 @@ import types
 import uuid
 from pathlib import Path
 
-VERSION = '0.2.1'  # Keep equal to tools/pool_guard/plugin.json and plugin.py.
+VERSION = '0.2.2'  # Keep equal to tools/pool_guard/plugin.json and plugin.py.
 GRACE_SECONDS = 180
 INDEX = 'm3u:owned_slots'
 WORKERS = 'm3u:pool_guard:workers'

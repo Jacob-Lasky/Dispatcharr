@@ -5,10 +5,15 @@ import sys
 
 class Plugin:
     name = 'M3U Reservation Guard'
-    version = '0.2.1'
+    version = '0.2.2'
     description = 'Tracks provider slot ownership and reclaims abandoned reservations.'
     actions = [{'id': 'status', 'label': 'Status'}]
 
+    # DO NOT move this to on_leader_acquired. The guard is per-process hooks on
+    # the proxy's slot accounting, not a background service: every uWSGI web
+    # worker serving streams must carry them. A leader-elected service would
+    # run in one process and leave the others unguarded. Install creates no
+    # thread; reclamation rides the proxy's existing maintenance loop.
     def __init__(self):
         from apps.plugins.models import PluginConfig
         if not PluginConfig.objects.filter(key='m3u_pool_guard', enabled=True).exists():
@@ -31,6 +36,7 @@ class Plugin:
                 'reclamation_enabled': bool(guard and guard.reclamation_enabled),
                 'grace_seconds': guard.module.GRACE_SECONDS if guard else None,
                 'source_file': guard.module.__file__ if guard else None,
+                'guard_version': guard.module.VERSION if guard else None,
                 'worker_pid': os.getpid(), 'version': self.version}
 
     def stop(self, context=None):
