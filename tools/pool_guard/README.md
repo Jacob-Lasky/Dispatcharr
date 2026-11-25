@@ -3,6 +3,10 @@ web workers through the plugin loader, without restarting an active stream.
 `apps/m3u/reservation_guard.py` is the implementation; copy that file alongside
 this directory's `plugin.py`, `plugin.json` and `__init__.py` into the persistent
 plugin directory `m3u_pool_guard`, then enable it and reload plugins once.
+A reload installs the guard only in a worker that has none: a worker that
+already runs a guard reuses it, code included. A new guard version therefore
+reaches a web worker only when that worker process starts again; restart the
+container so every worker runs the same version.
 
 On Tower this is `/mnt/cache/appdata/dispatcharr/data/plugins/m3u_pool_guard/`
 (also visible through `/mnt/user/appdata/dispatcharr/data/`). The existing
