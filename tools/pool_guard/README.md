@@ -35,9 +35,11 @@ hooks every web worker that serves streams must carry, so it installs in each
 worker from `Plugin.__init__`, as before. Installing creates no thread, writes
 no files and needs no plugin data directory.
 
-0.2.2 changed only the manifest, the Status output and the version string, so
-its guard logic is the same as 0.2.1's. Deploying it over a running 0.2.1 needs a plugin reload,
-not a restart. Status reports both `version` (the adapter) and
+0.2.2 changed only the manifest, the Status output and the version string.
+0.2.3 removes 0.2.1's profile-move change (JAKE-670), so its guard logic is
+0.2.0's again; the stock VOD release it worked around is reported upstream as
+https://github.com/Dispatcharr/Dispatcharr/issues/2036. Deploying 0.2.3 over a
+running 0.2.1 or 0.2.2 changes guard code, so it needs a restart. Status reports both `version` (the adapter) and
 `guard_version` (the guard each worker actually runs); they differ until that
 worker next starts.
 
@@ -66,10 +68,6 @@ with Lua. Logs include profile, owner, client ID, worker and generation token;
 provider URLs and credentials are never included. Existing streams without an
 owner record keep the original release path. VOD and catch-up retain their
 session managers' existing reservation pairing and are logged as unbound.
-Profile movement gives back or carries a credential slot only while the
-owner's old profile counter is above zero, the same rule as release. A stock
-VOD release that was never paired (JAKE-670) can leave that counter at zero;
-a later move then takes a fresh credential slot instead of a sibling's.
 Ranked Matchups 1.38.5 supplies a task owner tied to its global probe lock.
 
 Dispatcharr 0.34 runs plugin discovery on its `plugin-leader-election`

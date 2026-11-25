@@ -5,7 +5,7 @@ import sys
 
 class Plugin:
     name = 'M3U Reservation Guard'
-    version = '0.2.2'
+    version = '0.2.3'
     description = 'Tracks provider slot ownership and reclaims abandoned reservations.'
     actions = [{'id': 'status', 'label': 'Status'}]
 

@@ -124,7 +124,7 @@ class ReservationGuardCompatibilityTests(TestCase):
                 os.makedirs(os.path.join(proc, pid))
                 with open(os.path.join(proc, pid, 'cmdline'), 'wb') as f:
                     f.write(cmd)
-            registry = {f'{host}:101'.encode(): b'0.2.2', f'{host}:102'.encode(): b'0.2.2',
+            registry = {f'{host}:101'.encode(): b'0.2.3', f'{host}:102'.encode(): b'0.2.3',
                         f'{host}:103'.encode(): b'0.2.1', b'otherhost:101': b'0.2.1'}
             client = SimpleNamespace(hgetall=lambda key: registry if key == guard_module.WORKERS else {})
             core_utils = ModuleType('core.utils')
@@ -139,8 +139,8 @@ class ReservationGuardCompatibilityTests(TestCase):
                 registry.clear()
                 empty = adapter.Plugin.__new__(adapter.Plugin).run('status')
         self.assertEqual(status['status'], 'ok')
-        self.assertEqual(status['web_workers'], {f'{host}:101': '0.2.2'})
-        self.assertEqual(status['guard_version'], '0.2.2')
+        self.assertEqual(status['web_workers'], {f'{host}:101': '0.2.3'})
+        self.assertEqual(status['guard_version'], '0.2.3')
         self.assertIsNone(status['reclamation_enabled'])
         self.assertEqual(empty['status'], 'error')
         self.assertFalse(empty['installed'])
