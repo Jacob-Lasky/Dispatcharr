@@ -12,7 +12,7 @@ container recreation. No image-layer core file, fork image, startup script or
 additional mount is used. The loader installs the guard in each web worker
 at startup. This is a runtime adapter for the core fix, not a fork image.
 
-Version 0.2.0 checks the `__version__` stamped in the image's `version.py`
+Version 0.2.1 checks the `__version__` stamped in the image's `version.py`
 and the SHA-256 of all ten hooked core/loader source files before installing or re-enabling the guard. Only
 Dispatcharr 0.34.1 with the source contract from upstream revision
 `83f82bf388b72ec1e6cc356f1015a9812228b424` is admitted. An upstream version or
@@ -40,6 +40,10 @@ with Lua. Logs include profile, owner, client ID, worker and generation token;
 provider URLs and credentials are never included. Existing streams without an
 owner record keep the original release path. VOD and catch-up retain their
 session managers' existing reservation pairing and are logged as unbound.
+Profile movement gives back or carries a credential slot only while the
+owner's old profile counter is above zero, the same rule as release. A stock
+VOD release that was never paired (JAKE-670) can leave that counter at zero;
+a later move then takes a fresh credential slot instead of a sibling's.
 Ranked Matchups 1.38.5 supplies a task owner tied to its global probe lock.
 
 Dispatcharr 0.34 runs plugin discovery on its `plugin-leader-election`

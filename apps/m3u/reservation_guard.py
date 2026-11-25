@@ -23,7 +23,7 @@ import types
 import uuid
 from pathlib import Path
 
-VERSION = '0.2.0'  # Keep equal to tools/pool_guard/plugin.json and plugin.py.
+VERSION = '0.2.1'  # Keep equal to tools/pool_guard/plugin.json and plugin.py.
 GRACE_SECONDS = 180
 INDEX = 'm3u:owned_slots'
 WORKERS = 'm3u:pool_guard:workers'
@@ -165,11 +165,18 @@ if redis.call('HGET', KEYS[1], 'profile') ~= ARGV[1] then return 0 end
 local oldcred = redis.call('HGET', KEYS[1], 'credential') or ''
 local limit = tonumber(ARGV[3]); local count = tonumber(redis.call('GET', KEYS[3]) or '0')
 if limit > 0 and count >= limit then return 0 end
-if KEYS[4] ~= oldcred and KEYS[4] ~= '' and tonumber(redis.call('GET', KEYS[4]) or '0') >= limit then return 0 end
-if redis.call('HGET', KEYS[1], 'counted') == '1' and tonumber(redis.call('GET', KEYS[2]) or '0') > 0 then redis.call('DECR', KEYS[2]) end
+-- Same rule as _RELEASE: this owner still holds its profile slot, and so its
+-- credential slot, only while the old profile counter is above zero. After an
+-- earlier unpaired release it holds neither, so DO NOT give back the old
+-- credential slot or carry it to a sibling profile: both would take a slot
+-- another profile still holds.
+local held = redis.call('HGET', KEYS[1], 'counted') == '1' and tonumber(redis.call('GET', KEYS[2]) or '0') > 0
+local keep = held and oldcred ~= '' and oldcred == KEYS[4]
+if KEYS[4] ~= '' and not keep and tonumber(redis.call('GET', KEYS[4]) or '0') >= limit then return 0 end
+if held then redis.call('DECR', KEYS[2]) end
 if limit > 0 then redis.call('INCR', KEYS[3]) end
-if oldcred ~= KEYS[4] then
- if oldcred ~= '' and tonumber(redis.call('GET', oldcred) or '0') > 0 then redis.call('DECR', oldcred) end
+if not keep then
+ if held and oldcred ~= '' and tonumber(redis.call('GET', oldcred) or '0') > 0 then redis.call('DECR', oldcred) end
  if KEYS[4] ~= '' then redis.call('INCR', KEYS[4]) end
 end
 if KEYS[4] ~= '' then redis.call('SET', 'profile_credential_release:' .. ARGV[2], KEYS[4]) end

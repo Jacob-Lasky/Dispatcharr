@@ -1,1 +1,1 @@
-{"name":"M3U Reservation Guard","version":"0.2.0","description":"Core slot ownership and guarded orphan reclamation for Dispatcharr 0.34.1.","author":"Jacob-Lasky","actions":[{"id":"status","label":"Status"}]}
+{"name":"M3U Reservation Guard","version":"0.2.1","description":"Core slot ownership and guarded orphan reclamation for Dispatcharr 0.34.1.","author":"Jacob-Lasky","actions":[{"id":"status","label":"Status"}]}
