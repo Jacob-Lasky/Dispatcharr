@@ -41,6 +41,13 @@ not a restart. Status reports both `version` (the adapter) and
 `guard_version` (the guard each worker actually runs); they differ until that
 worker next starts.
 
+Dispatcharr 0.34 runs every plugin action on a Celery worker, which never
+installs the guard, so Status there reads the guard's own registration
+instead: `web_workers` lists each live uWSGI worker on this host that
+installed it, with the guard version it runs, and `installed` means at least
+one did. `reclamation_enabled`, `grace_seconds` and `source_file` live in each
+web worker's memory, so a Celery-served Status reports them as null.
+
 The plugin's Status action reports compatibility, loaded source path,
 `guard_version`, `reclamation_enabled` and `grace_seconds`. Startup/reload logs include
 `guard active ... reclamation_enabled=True grace_seconds=180`; reservation

@@ -1,6 +1,7 @@
 """Compatibility admission for the persistent plugin, without live services."""
 import ast
 import importlib.util
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -101,6 +102,48 @@ class ReservationGuardCompatibilityTests(TestCase):
         with patch.dict(sys.modules, modules), \
              patch.object(guard_module, 'compatibility_errors', return_value=['version mismatch']):
             self.assertEqual(adapter.Plugin.__new__(adapter.Plugin).run('status')['status'], 'error')
+
+    def _adapter(self):
+        source = Path(__file__).resolve().parents[3] / 'tools/pool_guard/plugin.py'
+        package = ModuleType('w466_guard_adapter_celery_test')
+        package.__path__ = []
+        spec = importlib.util.spec_from_file_location(package.__name__ + '.plugin', source)
+        adapter = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(adapter)
+        return package, adapter
+
+    def test_status_from_a_celery_worker_reads_live_web_workers(self):
+        """0.34 runs actions on Celery, where the guard is never installed; the
+        status must come from the web workers' registration, live ones only."""
+        import socket
+
+        package, adapter = self._adapter()
+        host = socket.gethostname()
+        with tempfile.TemporaryDirectory() as proc:
+            for pid, cmd in (('101', b'/dispatcharrpy/bin/uwsgi\0--ini'), ('102', b'celery\0worker')):
+                os.makedirs(os.path.join(proc, pid))
+                with open(os.path.join(proc, pid, 'cmdline'), 'wb') as f:
+                    f.write(cmd)
+            registry = {f'{host}:101'.encode(): b'0.2.2', f'{host}:102'.encode(): b'0.2.2',
+                        f'{host}:103'.encode(): b'0.2.1', b'otherhost:101': b'0.2.1'}
+            client = SimpleNamespace(hgetall=lambda key: registry if key == guard_module.WORKERS else {})
+            core_utils = ModuleType('core.utils')
+            core_utils.RedisClient = SimpleNamespace(get_client=lambda: client)
+            modules = {package.__name__: package,
+                       package.__name__ + '.reservation_guard': guard_module,
+                       'core.utils': core_utils}
+            with patch.dict(sys.modules, modules), patch.object(adapter, '_PROC', proc), \
+                 patch.object(guard_module, 'compatibility_errors', return_value=[]):
+                sys.modules.pop(guard_module._REGISTRY, None)
+                status = adapter.Plugin.__new__(adapter.Plugin).run('status')
+                registry.clear()
+                empty = adapter.Plugin.__new__(adapter.Plugin).run('status')
+        self.assertEqual(status['status'], 'ok')
+        self.assertEqual(status['web_workers'], {f'{host}:101': '0.2.2'})
+        self.assertEqual(status['guard_version'], '0.2.2')
+        self.assertIsNone(status['reclamation_enabled'])
+        self.assertEqual(empty['status'], 'error')
+        self.assertFalse(empty['installed'])
 
     def test_adapter_manifest_and_guard_versions_agree(self):
         import json
